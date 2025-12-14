@@ -113,14 +113,13 @@ func main() {
 	defer cancel()
 
 	telegramBotFatherToken := os.Getenv("TELEGRAM_BOTFATHER_TOKEN")
-	fmt.Println("telegramBotFatherToken: ", telegramBotFatherToken)
 
-	httpClient := createHTTPClientWithProxy("socks5://10.101.116.69:1088")
+	// httpClient := createHTTPClientWithProxy("socks5://10.101.116.69:1088")
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler),
 		bot.WithCheckInitTimeout(30 * time.Second),
-		bot.WithHTTPClient(30*time.Second, httpClient),
+		// bot.WithHTTPClient(30*time.Second, httpClient),
 	}
 	b, err := bot.New(telegramBotFatherToken, opts...)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, func(ctx context.Context, b *bot.Bot, update *models.Update) {

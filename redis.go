@@ -1,4 +1,4 @@
-package main
+package telegram_bot
 
 import (
 	"context"
@@ -6,16 +6,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func NewRedisClient(addr string) redis.Client {
+func NewRedisClient(addr string) (*redis.Client, error) {
 	options, err := redis.ParseURL(addr)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	client := redis.NewClient(options)
 	_, err = client.Ping(context.Background()).Result()
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
-	return *client
+	return client, nil
 }

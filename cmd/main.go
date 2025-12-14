@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	// telegram_bot "module/lynkbin-telegram-bot"
+	telegram_bot "module/lynkbin-telegram-bot"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -95,19 +95,31 @@ func isValidURL(msg string) bool {
 
 func main() {
 	fmt.Println("Hello, World!")
-	godotenv.Load()
+	godotenv.Load("../.env")
+
+	server := &http.Server{
+		Addr:    ":8081",
+		Handler: nil,
+	}
+
+	go func() {
+		fmt.Println("Starting HTTP server on port 8081")
+		if err := server.ListenAndServe(); err != nil {
+			fmt.Printf("HTTP server error: %v\n", err)
+		}
+	}()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
 	telegramBotFatherToken := os.Getenv("TELEGRAM_BOTFATHER_TOKEN")
 
-	// httpClient := createHTTPClientWithProxy("socks5://10.101.116.69:1088")
+	httpClient := createHTTPClientWithProxy("socks5://10.101.116.69:1088")
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler),
 		bot.WithCheckInitTimeout(30 * time.Second),
-		// bot.WithHTTPClient(30*time.Second, httpClient),
+		bot.WithHTTPClient(30*time.Second, httpClient),
 	}
 	b, err := bot.New(telegramBotFatherToken, opts...)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, func(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -115,9 +127,20 @@ func main() {
 	})
 
 	if err != nil {
-		panic(err)
+		fmt.Printf("Error creating bot: %v\n", err)
+		os.Exit(1)
 	}
+
+	// Start the bot
 	b.Start(ctx)
+
+	// shutdown HTTP server
+	fmt.Println("Shutting down HTTP server...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		fmt.Printf("HTTP server shutdown error: %v\n", err)
+	}
 }
 
 func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -134,7 +157,12 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	redisUrl := os.Getenv("REDIS_URL")
 	fmt.Println("redisUrl: ", redisUrl)
 	fmt.Printf("redisUrl: %s\n", redisUrl)
-	redisClient := NewRedisClient(redisUrl)
+	redisClient, err := telegram_bot.NewRedisClient(redisUrl)
+	if err != nil {
+		fmt.Printf("Error creating Redis client: %v\n", err)
+		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
+		return
+	}
 	loginKey := fmt.Sprintf("login:%d", chatId)
 	email, err := redisClient.Get(context.Background(), loginKey).Result()
 	if err != nil {
@@ -143,7 +171,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	isLogin := email != ""
 
 	if strings.HasPrefix(msg, "/login") {
-		loginResponse := hanldeLogin(msg, chatId, isLogin, &redisClient)
+		loginResponse := hanldeLogin(msg, chatId, isLogin, *redisClient)
 
 		sendMessage(ctx, b, chatId, loginResponse)
 		return
@@ -213,7 +241,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	sendMessage(ctx, b, chatId, finalMsg)
 }
 
-func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient *redis.Client) string {
+func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Client) string {
 	if isLogin {
 		return "You are already logged in. Paste your link here to store in Lynkbin"
 	}

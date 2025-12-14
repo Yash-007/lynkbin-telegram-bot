@@ -95,10 +95,7 @@ func isValidURL(msg string) bool {
 
 func main() {
 	fmt.Println("Hello, World!")
-	err := godotenv.Load()
-	if err != nil {
-		panic(err)
-	}
+	godotenv.Load()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()

@@ -170,7 +170,8 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
-	req, err := http.NewRequest("POST", "http://localhost:8080/posts", bytes.NewBuffer(jsonPayload))
+	serverUrl := os.Getenv("LYNKBIN_SERVER_URL")
+	req, err := http.NewRequest("POST", serverUrl+"/posts", bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		fmt.Printf("Error creating request: %v\n", err)
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")

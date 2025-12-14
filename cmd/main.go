@@ -220,8 +220,9 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	escapedUrl := url.PathEscape(strings.TrimSpace(msg))
 	fmt.Printf("[ChatID: %d] Creating post for URL: %s\n", chatId, msg)
 
-	createPostPayload := map[string]string{
-		"url": escapedUrl,
+	createPostPayload := map[string]any{
+		"url":    escapedUrl,
+		"is_url": true,
 	}
 	jsonPayload, err := json.Marshal(createPostPayload)
 	if err != nil {

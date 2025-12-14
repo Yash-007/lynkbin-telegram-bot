@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -79,14 +80,17 @@ func isValidURL(msg string) bool {
 
 	parsedURL, err := url.Parse(msg)
 	if err != nil {
+		fmt.Printf("Error parsing URL '%s': %v\n", msg, err)
 		return false
 	}
 
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		fmt.Printf("Invalid URL scheme '%s' for URL: %s\n", parsedURL.Scheme, msg)
 		return false
 	}
 
 	if parsedURL.Host == "" {
+		fmt.Printf("Empty host in URL: %s\n", msg)
 		return false
 	}
 
@@ -94,8 +98,12 @@ func isValidURL(msg string) bool {
 }
 
 func main() {
-	fmt.Println("Hello, World!")
-	godotenv.Load("../.env")
+	fmt.Println("Lynkbit Telegram Bot Starting...")
+
+	if err := godotenv.Load("../.env"); err != nil {
+		fmt.Printf("Warning: Error loading .env file: %v\n", err)
+		fmt.Println("Continuing with system environment variables...")
+	}
 
 	server := &http.Server{
 		Addr:    ":8081",
@@ -104,7 +112,7 @@ func main() {
 
 	go func() {
 		fmt.Println("Starting HTTP server on port 8081")
-		if err := server.ListenAndServe(); err != nil {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			fmt.Printf("HTTP server error: %v\n", err)
 		}
 	}()
@@ -113,6 +121,10 @@ func main() {
 	defer cancel()
 
 	telegramBotFatherToken := os.Getenv("TELEGRAM_BOTFATHER_TOKEN")
+	if telegramBotFatherToken == "" {
+		fmt.Println("Error: TELEGRAM_BOTFATHER_TOKEN environment variable is not set")
+		os.Exit(1)
+	}
 
 	// httpClient := createHTTPClientWithProxy("socks5://10.101.116.69:1088")
 
@@ -121,25 +133,35 @@ func main() {
 		bot.WithCheckInitTimeout(30 * time.Second),
 		// bot.WithHTTPClient(30*time.Second, httpClient),
 	}
-	b, err := bot.New(telegramBotFatherToken, opts...)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		sendMessage(ctx, b, update.Message.Chat.ID, getBaseMsg())
-	})
 
+	fmt.Println("Initializing Telegram bot...")
+	b, err := bot.New(telegramBotFatherToken, opts...)
 	if err != nil {
 		fmt.Printf("Error creating bot: %v\n", err)
 		os.Exit(1)
 	}
 
+	fmt.Println("Registering bot handlers...")
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/start", bot.MatchTypeExact, func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		if update == nil || update.Message == nil {
+			fmt.Println("Error: Received nil update or message in /start handler")
+			return
+		}
+		sendMessage(ctx, b, update.Message.Chat.ID, getBaseMsg())
+	})
+
 	// Start the bot
+	fmt.Println("Telegram bot started successfully! Listening for messages...")
 	b.Start(ctx)
 
-	// shutdown HTTP server
-	fmt.Println("Shutting down HTTP server...")
+	// Graceful shutdown
+	fmt.Println("Received shutdown signal. Shutting down gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		fmt.Printf("HTTP server shutdown error: %v\n", err)
+		fmt.Printf("Error during HTTP server shutdown: %v\n", err)
+	} else {
+		fmt.Println("HTTP server shutdown successfully")
 	}
 }
 
@@ -148,60 +170,78 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	fmt.Printf("message Id: %d\n", update.Message.Chat.ID)
 	baseMsg := getBaseMsg()
 
+	chatId := int64(update.Message.Chat.ID)
 	msg := update.Message.Text
+
 	msg = strings.Replace(msg, "\u00a0", " ", -1)
 	msg = strings.TrimSpace(msg)
 
-	chatId := int64(update.Message.Chat.ID)
-
+	// Get Redis URL
 	redisUrl := os.Getenv("REDIS_URL")
-	fmt.Println("redisUrl: ", redisUrl)
-	fmt.Printf("redisUrl: %s\n", redisUrl)
+	if redisUrl == "" {
+		fmt.Printf("[ChatID: %d] Error: REDIS_URL environment variable is not set\n", chatId)
+		sendMessage(ctx, b, chatId, "Service configuration error.")
+		return
+	}
 	redisClient, err := telegram_bot.NewRedisClient(redisUrl)
 	if err != nil {
-		fmt.Printf("Error creating Redis client: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error creating Redis client: %v\n", chatId, err)
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
+
 	loginKey := fmt.Sprintf("login:%d", chatId)
 	email, err := redisClient.Get(context.Background(), loginKey).Result()
-	if err != nil {
-		fmt.Printf("Error getting login: %v\n", err)
+	if err != nil && err.Error() != "redis: nil" {
+		fmt.Printf("[ChatID: %d] Error getting login from Redis: %v\n", chatId, err)
 	}
 	isLogin := email != ""
+	fmt.Printf("[ChatID: %d] User login status: %v (email: %s)\n", chatId, isLogin, email)
 
 	if strings.HasPrefix(msg, "/login") {
+		fmt.Printf("[ChatID: %d] Processing login request\n", chatId)
 		loginResponse := hanldeLogin(msg, chatId, isLogin, *redisClient)
-
 		sendMessage(ctx, b, chatId, loginResponse)
 		return
 	}
 
 	if !isLogin {
+		fmt.Printf("[ChatID: %d] User not logged in, rejecting request\n", chatId)
 		sendMessage(ctx, b, update.Message.Chat.ID, "You are not logged in. Please login first before posting to Lynkbin \n\n "+baseMsg)
 		return
 	}
 
 	if !isValidURL(msg) {
+		fmt.Printf("[ChatID: %d] Invalid URL provided: %s\n", chatId, msg)
 		sendMessage(ctx, b, chatId, "Invalid URL. Please enter a valid URL to store in Lynkbin \n\n "+baseMsg)
 		return
 	}
 
 	escapedUrl := url.PathEscape(strings.TrimSpace(msg))
+	fmt.Printf("[ChatID: %d] Creating post for URL: %s\n", chatId, msg)
 
 	createPostPayload := map[string]string{
 		"url": escapedUrl,
 	}
 	jsonPayload, err := json.Marshal(createPostPayload)
 	if err != nil {
-		fmt.Printf("Error marshalling payload: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error marshalling payload: %v\n", chatId, err)
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
+
 	serverUrl := os.Getenv("LYNKBIN_SERVER_URL")
-	req, err := http.NewRequest("POST", serverUrl+"/posts", bytes.NewBuffer(jsonPayload))
+	if serverUrl == "" {
+		fmt.Printf("[ChatID: %d] Error: LYNKBIN_SERVER_URL environment variable is not set\n", chatId)
+		sendMessage(ctx, b, chatId, "Service configuration error. Please contact support.")
+		return
+	}
+
+	postUrl := serverUrl + "/posts"
+	fmt.Printf("[ChatID: %d] Posting to Lynkbin API: %s\n", chatId, postUrl)
+	req, err := http.NewRequest("POST", postUrl, bytes.NewBuffer(jsonPayload))
 	if err != nil {
-		fmt.Printf("Error creating request: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error creating HTTP request: %v\n", chatId, err)
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
@@ -211,13 +251,22 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 	resp, resErr := http.DefaultClient.Do(req)
 	if resErr != nil {
-		fmt.Printf("Error posting to Lynkbin: %v\n", resErr)
+		fmt.Printf("[ChatID: %d] Error posting to Lynkbin API: %v\n", chatId, resErr)
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 201 {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		fmt.Printf("[ChatID: %d] Error: Unexpected status code from Lynkbin API\n", chatId)
+		fmt.Printf("[ChatID: %d] Status Code: %d\n", chatId, resp.StatusCode)
+		fmt.Printf("[ChatID: %d] Status: %s\n", chatId, resp.Status)
+		if readErr != nil {
+			fmt.Printf("[ChatID: %d] Error reading response body: %v\n", chatId, readErr)
+		} else {
+			fmt.Printf("[ChatID: %d] Response Body: %s\n", chatId, string(bodyBytes))
+		}
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
@@ -225,24 +274,27 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	var postResponse PostResponse
 	err = json.NewDecoder(resp.Body).Decode(&postResponse)
 	if err != nil {
-		fmt.Printf("Error decoding response body: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error decoding response body: %v\n", chatId, err)
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
 
 	if !postResponse.Success {
+		fmt.Printf("[ChatID: %d] Post creation failed. Server message: %s\n", chatId, postResponse.Message)
 		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
 		return
 	}
 
 	postLink := postResponse.Data["post_link"].(string)
-	finalMsg := fmt.Sprintf("Your link has been stored on Lynkbin: %s", postLink)
 
+	fmt.Printf("[ChatID: %d] Successfully created post: %s\n", chatId, postLink)
+	finalMsg := fmt.Sprintf("Your link has been stored on Lynkbin: %s", postLink)
 	sendMessage(ctx, b, chatId, finalMsg)
 }
 
 func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Client) string {
 	if isLogin {
+		fmt.Printf("[ChatID: %d] User already logged in\n", chatId)
 		return "You are already logged in. Paste your link here to store in Lynkbin"
 	}
 
@@ -252,8 +304,12 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 	email := strings.Split(msg, " ")[0]
 	password := strings.TrimPrefix(msg, email+" ")
 
-	fmt.Printf("%s\n", email)
-	fmt.Printf("%s\n", password)
+	if email == "" || password == "" {
+		fmt.Printf("[ChatID: %d] Empty email or password provided\n", chatId)
+		return "Email and password cannot be empty. Please use: /login <email> <password>"
+	}
+
+	fmt.Printf("[ChatID: %d] Attempting login for email: %s\n", chatId, email)
 
 	loginPayload := map[string]string{
 		"email":    email,
@@ -261,12 +317,20 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 	}
 	jsonPayload, err := json.Marshal(loginPayload)
 	if err != nil {
-		fmt.Printf("Error marshalling payload: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error marshalling login payload: %v\n", chatId, err)
 		return "Unable to process login request"
 	}
-	req, err := http.NewRequest("POST", "http://localhost:8080/users/login", bytes.NewBuffer(jsonPayload))
+
+	loginUrl := os.Getenv("LYNKBIN_SERVER_URL")
+	if loginUrl == "" {
+		fmt.Printf("[ChatID: %d] Warning: LYNKBIN_SERVER_URL not set, using default: %s\n", chatId, loginUrl)
+	}
+	loginUrl = loginUrl + "/users/login"
+
+	fmt.Printf("[ChatID: %d] Sending login request to: %s\n", chatId, loginUrl)
+	req, err := http.NewRequest("POST", loginUrl, bytes.NewBuffer(jsonPayload))
 	if err != nil {
-		fmt.Printf("Error creating request: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error creating login request: %v\n", chatId, err)
 		return "Unable to process login request"
 	}
 
@@ -275,18 +339,23 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 
 	resp, resErr := http.DefaultClient.Do(req)
 	if resErr != nil {
-		fmt.Printf("Error login: %v\n", resErr)
+		fmt.Printf("[ChatID: %d] Error making login request: %v\n", chatId, resErr)
 		return "Unable to process login request"
 	}
 
 	defer resp.Body.Close()
+
+	fmt.Printf("[ChatID: %d] Login response status: %d %s\n", chatId, resp.StatusCode, resp.Status)
+
 	var loginResponse LoginResponse
 	err = json.NewDecoder(resp.Body).Decode(&loginResponse)
 	if err != nil {
-		fmt.Printf("Error decoding response body: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error decoding login response body: %v\n", chatId, err)
 		return "Unable to process login request"
 	}
+
 	if !loginResponse.Success {
+		fmt.Printf("[ChatID: %d] Login failed. Message: %s\n", chatId, loginResponse.Message)
 		if loginResponse.Message == "User not found" {
 			return "Email not found. Please register first before logging in:\nhttps://lynkbin.com/register\n\n" + getBaseMsg()
 		}
@@ -296,15 +365,21 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 	loginKey := fmt.Sprintf("login:%d", chatId)
 	err = redisClient.Set(context.Background(), loginKey, email, 0).Err()
 	if err != nil {
-		fmt.Printf("Error setting login: %v\n", err)
+		fmt.Printf("[ChatID: %d] Error saving login to Redis: %v\n", chatId, err)
 		return "Unable to process login request"
 	}
+
+	fmt.Printf("[ChatID: %d] Login successful for email: %s\n", chatId, email)
 	return "Login successful. Paste your link here to store in Lynkbin"
 }
 
 func sendMessage(ctx context.Context, b *bot.Bot, chatId int64, text string) {
-	b.SendMessage(ctx, &bot.SendMessageParams{
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: chatId,
 		Text:   text,
 	})
+	if err != nil {
+		fmt.Printf("[ChatID: %d] Error sending message to user: %v\n", chatId, err)
+		fmt.Printf("[ChatID: %d] Failed message text: %s\n", chatId, text)
+	}
 }

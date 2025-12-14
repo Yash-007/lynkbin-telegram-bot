@@ -113,6 +113,7 @@ func main() {
 	defer cancel()
 
 	telegramBotFatherToken := os.Getenv("TELEGRAM_BOTFATHER_TOKEN")
+	fmt.Println("telegramBotFatherToken: ", telegramBotFatherToken)
 
 	httpClient := createHTTPClientWithProxy("socks5://10.101.116.69:1088")
 

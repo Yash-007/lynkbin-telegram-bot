@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/go-telegram/ui/keyboard/inline"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/net/proxy"
@@ -97,6 +99,15 @@ func isValidURL(msg string) bool {
 	return true
 }
 
+var saveNoteKeyboard *inline.Keyboard
+
+func initSaveNoteKeyboard(b *bot.Bot) {
+	saveNoteKeyboard = inline.New(b).
+		Row().
+		Button("Yes", []byte("Yes"), saveNoteKeyboardHandler).
+		Button("No", []byte("No"), saveNoteKeyboardHandler)
+}
+
 func main() {
 	fmt.Println("Lynkbit Telegram Bot Starting...")
 
@@ -126,12 +137,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// httpClient := createHTTPClientWithProxy("socks5://10.101.116.69:1088")
+	httpClient := createHTTPClientWithProxy("socks5://100.90.121.251:1088")
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler),
 		bot.WithCheckInitTimeout(30 * time.Second),
-		// bot.WithHTTPClient(30*time.Second, httpClient),
+		bot.WithHTTPClient(30*time.Second, httpClient),
 	}
 
 	fmt.Println("Initializing Telegram bot...")
@@ -165,12 +176,15 @@ func main() {
 	}
 }
 
+var saveNoteInitialisedMsgIds = make(map[int64]int)
+
 func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	fmt.Printf("message: %s\n", update.Message.Text)
 	fmt.Printf("message Id: %d\n", update.Message.Chat.ID)
 	baseMsg := getBaseMsg()
 
 	chatId := int64(update.Message.Chat.ID)
+	msgId := update.Message.ID
 	msg := update.Message.Text
 
 	msg = strings.Replace(msg, "\u00a0", " ", -1)
@@ -212,8 +226,15 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	}
 
 	if !isValidURL(msg) {
-		fmt.Printf("[ChatID: %d] Invalid URL provided: %s\n", chatId, msg)
-		sendMessage(ctx, b, chatId, "Invalid URL. Please enter a valid URL to store in Lynkbin \n\n "+baseMsg)
+		fmt.Printf("[ChatID: %d] Invalid URL provided, user may want to save a note: %s\n", chatId, msg)
+		initSaveNoteKeyboard(b)
+		saveNoteInitialisedMsgIds[chatId] = msgId
+		b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:      chatId,
+			Text:        "Do you want to save it as a note? \n\n " + baseMsg,
+			ReplyMarkup: saveNoteKeyboard,
+		})
+		// sendMessage(ctx, b, chatId, "Do you want to save it as a note? \n\n "+baseMsg)
 		return
 	}
 
@@ -372,6 +393,26 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 
 	fmt.Printf("[ChatID: %d] Login successful for email: %s\n", chatId, email)
 	return "Login successful. Paste your link here to store in Lynkbin"
+}
+
+func saveNoteKeyboardHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
+	dataString := string(data)
+	msg := ""
+	if dataString == "Yes" {
+		prevMsgId := saveNoteInitialisedMsgIds[mes.Message.Chat.ID]
+		if prevMsgId != 0 {
+			msg = "msgId: " + strconv.Itoa(prevMsgId)
+		} else {
+			msg = "msgId not found"
+		}
+	} else {
+		delete(saveNoteInitialisedMsgIds, mes.Message.Chat.ID)
+		msg = "no note saved"
+	}
+	b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: mes.Message.Chat.ID,
+		Text:   msg,
+	})
 }
 
 func sendMessage(ctx context.Context, b *bot.Bot, chatId int64, text string) {

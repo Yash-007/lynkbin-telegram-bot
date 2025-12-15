@@ -4,6 +4,7 @@ go 1.24.4
 
 require (
 	github.com/go-telegram/bot v1.17.0
+	github.com/go-telegram/ui v0.5.1
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.17.0
 	golang.org/x/net v0.47.0

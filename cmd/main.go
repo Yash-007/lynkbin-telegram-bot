@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"time"
 
@@ -74,7 +73,7 @@ func createHTTPClientWithProxy(proxyURL string) *http.Client {
 }
 
 func getBaseMsg() string {
-	return "Welcome to Lynkbin!\n\n For register, visit: https://lynkbin.com/register\n\n For login, use command:\n /login <email> <password> \n\n for storing your links: just paste your link here"
+	return "Welcome to Lynkbin!\n\n For register, visit: https://lynkbin.com/register\n\n For login, use command:\n /login <email> <password> \n\n for storing your links or notes: just paste it here"
 }
 
 func isValidURL(msg string) bool {
@@ -104,8 +103,8 @@ var saveNoteKeyboard *inline.Keyboard
 func initSaveNoteKeyboard(b *bot.Bot) {
 	saveNoteKeyboard = inline.New(b).
 		Row().
-		Button("Yes", []byte("Yes"), saveNoteKeyboardHandler).
-		Button("No", []byte("No"), saveNoteKeyboardHandler)
+		Button("Yes", []byte("YES"), saveNoteKeyboardHandler).
+		Button("No", []byte("NO"), saveNoteKeyboardHandler)
 }
 
 func main() {
@@ -137,12 +136,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	httpClient := createHTTPClientWithProxy("socks5://100.90.121.251:1088")
+	// httpClient := createHTTPClientWithProxy("socks5://100.66.203.187:1088")
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(handler),
 		bot.WithCheckInitTimeout(30 * time.Second),
-		bot.WithHTTPClient(30*time.Second, httpClient),
+		// bot.WithHTTPClient(30*time.Second, httpClient),
 	}
 
 	fmt.Println("Initializing Telegram bot...")
@@ -176,7 +175,14 @@ func main() {
 	}
 }
 
-var saveNoteInitialisedMsgIds = make(map[int64]int)
+func getLoginEmail(redisClient *redis.Client, chatId int64) string {
+	loginKey := fmt.Sprintf("login:%d", chatId)
+	email, err := redisClient.Get(context.Background(), loginKey).Result()
+	if err != nil && err.Error() != "redis: nil" {
+		fmt.Printf("[ChatID: %d] Error getting login from Redis: %v\n", chatId, err)
+	}
+	return email
+}
 
 func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	fmt.Printf("message: %s\n", update.Message.Text)
@@ -184,7 +190,6 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	baseMsg := getBaseMsg()
 
 	chatId := int64(update.Message.Chat.ID)
-	msgId := update.Message.ID
 	msg := update.Message.Text
 
 	msg = strings.Replace(msg, "\u00a0", " ", -1)
@@ -204,11 +209,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		return
 	}
 
-	loginKey := fmt.Sprintf("login:%d", chatId)
-	email, err := redisClient.Get(context.Background(), loginKey).Result()
-	if err != nil && err.Error() != "redis: nil" {
-		fmt.Printf("[ChatID: %d] Error getting login from Redis: %v\n", chatId, err)
-	}
+	email := getLoginEmail(redisClient, chatId)
 	isLogin := email != ""
 	fmt.Printf("[ChatID: %d] User login status: %v (email: %s)\n", chatId, isLogin, email)
 
@@ -228,35 +229,37 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if !isValidURL(msg) {
 		fmt.Printf("[ChatID: %d] Invalid URL provided, user may want to save a note: %s\n", chatId, msg)
 		initSaveNoteKeyboard(b)
-		saveNoteInitialisedMsgIds[chatId] = msgId
+		redisClient.Set(context.Background(), fmt.Sprintf("user_note:%d", chatId), msg, 120*time.Second)
 		b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:      chatId,
-			Text:        "Do you want to save it as a note? \n\n " + baseMsg,
+			Text:        "Do you want to save it as a note?",
 			ReplyMarkup: saveNoteKeyboard,
 		})
-		// sendMessage(ctx, b, chatId, "Do you want to save it as a note? \n\n "+baseMsg)
 		return
 	}
 
 	escapedUrl := url.PathEscape(strings.TrimSpace(msg))
-	fmt.Printf("[ChatID: %d] Creating post for URL: %s\n", chatId, msg)
+	fmt.Printf("[ChatID: %d] Creating post for URL: %s\n", chatId, escapedUrl)
 
 	createPostPayload := map[string]any{
 		"url":    escapedUrl,
 		"is_url": true,
 	}
-	jsonPayload, err := json.Marshal(createPostPayload)
+	responseMsg := createLynkbinPost(chatId, email, createPostPayload)
+	sendMessage(ctx, b, chatId, responseMsg)
+}
+
+func createLynkbinPost(chatId int64, email string, payload map[string]any) string {
+	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error marshalling payload: %v\n", chatId, err)
-		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
-		return
+		return "Unable to process your request. Please try again later."
 	}
 
 	serverUrl := os.Getenv("LYNKBIN_SERVER_URL")
 	if serverUrl == "" {
 		fmt.Printf("[ChatID: %d] Error: LYNKBIN_SERVER_URL environment variable is not set\n", chatId)
-		sendMessage(ctx, b, chatId, "Service configuration error. Please contact support.")
-		return
+		return "Service configuration error. Please contact support."
 	}
 
 	postUrl := serverUrl + "/posts"
@@ -264,8 +267,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	req, err := http.NewRequest("POST", postUrl, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error creating HTTP request: %v\n", chatId, err)
-		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
-		return
+		return "Unable to process your request. Please try again later."
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Platform-Id", "telegram-bot")
@@ -274,8 +276,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 	resp, resErr := http.DefaultClient.Do(req)
 	if resErr != nil {
 		fmt.Printf("[ChatID: %d] Error posting to Lynkbin API: %v\n", chatId, resErr)
-		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
-		return
+		return "Unable to process your request. Please try again later."
 	}
 	defer resp.Body.Close()
 
@@ -289,29 +290,24 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		} else {
 			fmt.Printf("[ChatID: %d] Response Body: %s\n", chatId, string(bodyBytes))
 		}
-		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
-		return
+		return "Unable to process your request. Please try again later."
 	}
 
 	var postResponse PostResponse
 	err = json.NewDecoder(resp.Body).Decode(&postResponse)
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error decoding response body: %v\n", chatId, err)
-		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
-		return
+		return "Unable to process your request. Please try again later."
 	}
 
 	if !postResponse.Success {
 		fmt.Printf("[ChatID: %d] Post creation failed. Server message: %s\n", chatId, postResponse.Message)
-		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
-		return
+		return "Unable to process your request. Please try again later."
 	}
 
 	postLink := postResponse.Data["post_link"].(string)
-
 	fmt.Printf("[ChatID: %d] Successfully created post: %s\n", chatId, postLink)
-	finalMsg := fmt.Sprintf("Your link has been stored on Lynkbin: %s", postLink)
-	sendMessage(ctx, b, chatId, finalMsg)
+	return fmt.Sprintf("Your link has been stored on Lynkbin: %s", postLink)
 }
 
 func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Client) string {
@@ -398,21 +394,43 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 func saveNoteKeyboardHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
 	dataString := string(data)
 	msg := ""
-	if dataString == "Yes" {
-		prevMsgId := saveNoteInitialisedMsgIds[mes.Message.Chat.ID]
-		if prevMsgId != 0 {
-			msg = "msgId: " + strconv.Itoa(prevMsgId)
+	chatId := mes.Message.Chat.ID
+	redisClient, err := telegram_bot.NewRedisClient(os.Getenv("REDIS_URL"))
+	if err != nil {
+		fmt.Printf("[ChatID: %d] Error creating Redis client: %v\n", chatId, err)
+		sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
+		return
+	}
+
+	email := getLoginEmail(redisClient, chatId)
+	if email == "" {
+		fmt.Printf("[ChatID: %d] User not logged in, rejecting request\n", chatId)
+		baseMsg := getBaseMsg()
+		sendMessage(ctx, b, chatId, "You are not logged in. Please login first before posting to Lynkbin \n\n "+baseMsg)
+		return
+	}
+
+	userNoteKey := fmt.Sprintf("user_note:%d", chatId)
+
+	if dataString == "YES" {
+		userNote, err := redisClient.Get(context.Background(), userNoteKey).Result()
+		if err == redis.Nil {
+			fmt.Printf("[ChatID: %d] Error getting user note: %v\n", chatId, err)
+			msg = "Time limit expired. Please start over."
+		} else if err != nil {
+			fmt.Printf("[ChatID: %d] Error getting user note: %v\n", chatId, err)
+			msg = "Unable to process your request. Please try again later."
 		} else {
-			msg = "msgId not found"
+			payload := map[string]any{
+				"notes": userNote,
+			}
+			msg = createLynkbinPost(chatId, email, payload)
 		}
 	} else {
-		delete(saveNoteInitialisedMsgIds, mes.Message.Chat.ID)
+		redisClient.Del(context.Background(), userNoteKey)
 		msg = "no note saved"
 	}
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: mes.Message.Chat.ID,
-		Text:   msg,
-	})
+	sendMessage(ctx, b, chatId, msg)
 }
 
 func sendMessage(ctx context.Context, b *bot.Bot, chatId int64, text string) {

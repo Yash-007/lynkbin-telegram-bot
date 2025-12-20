@@ -120,6 +120,11 @@ func main() {
 		Handler: nil,
 	}
 
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Lynkbin Telegram Bot is running"))
+	})
+
 	go func() {
 		fmt.Println("Starting HTTP server on port 8081")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

@@ -73,7 +73,7 @@ func createHTTPClientWithProxy(proxyURL string) *http.Client {
 }
 
 func getBaseMsg() string {
-	return "Welcome to Lynkbin!\n\n For register, visit: https://lynkbin.com/register\n\n For login, use command:\n /login <email> <password> \n\n for storing your links or notes: just paste it here"
+	return "Welcome to Lynkbin!\n\n For register, visit: https://lynkbin.vercel.app/auth\n\n For login, use command:\n /login <email> <password> \n\n for storing your links or notes: just paste it here"
 }
 
 func isValidURL(msg string) bool {
@@ -380,7 +380,7 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 	if !loginResponse.Success {
 		fmt.Printf("[ChatID: %d] Login failed. Message: %s\n", chatId, loginResponse.Message)
 		if loginResponse.Message == "User not found" {
-			return "Email not found. Please register first before logging in:\nhttps://lynkbin.com/register\n\n" + getBaseMsg()
+			return "Email not found. Please register first before logging in:\nhttps://lynkbin.vercel.app/auth\n\n" + getBaseMsg()
 		}
 		return loginResponse.Message
 	}

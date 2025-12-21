@@ -73,7 +73,7 @@ func createHTTPClientWithProxy(proxyURL string) *http.Client {
 }
 
 func getBaseMsg() string {
-	return "Welcome to Lynkbin!\n\n For register, visit: https://lynkbin.vercel.app/auth\n\n For login, use command:\n /login <email> <password> \n\n for storing your links or notes: just paste it here"
+	return "Welcome to Lynkbin!\n\n For commands: /start\n\n For register, visit: https://lynkbin.vercel.app/auth\n\n For login, use command:\n /login &lt;email&gt; &lt;password&gt; \n\n For storing your links or notes: just paste it here\n\n <b>Long-press links to open in default browser</b>"
 }
 
 func isValidURL(msg string) bool {
@@ -250,21 +250,26 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		"url":    escapedUrl,
 		"is_url": true,
 	}
-	responseMsg := createLynkbinPost(chatId, email, createPostPayload)
+	postLink, err := createLynkbinPost(chatId, email, createPostPayload)
+	if err != nil {
+		sendMessage(ctx, b, chatId, err.Error())
+		return
+	}
+	responseMsg := fmt.Sprintf("Link saved successfully:%s\n\n <b>Long-press link to open in default browser</b>\n\n %s", postLink, baseMsg)
 	sendMessage(ctx, b, chatId, responseMsg)
 }
 
-func createLynkbinPost(chatId int64, email string, payload map[string]any) string {
+func createLynkbinPost(chatId int64, email string, payload map[string]any) (string, error) {
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error marshalling payload: %v\n", chatId, err)
-		return "Unable to process your request. Please try again later."
+		return "", fmt.Errorf("unable to process your request. Please try again later")
 	}
 
 	serverUrl := os.Getenv("LYNKBIN_SERVER_URL")
 	if serverUrl == "" {
 		fmt.Printf("[ChatID: %d] Error: LYNKBIN_SERVER_URL environment variable is not set\n", chatId)
-		return "Service configuration error. Please contact support."
+		return "", fmt.Errorf("service configuration error. Please contact support")
 	}
 
 	postUrl := serverUrl + "/posts"
@@ -272,7 +277,7 @@ func createLynkbinPost(chatId int64, email string, payload map[string]any) strin
 	req, err := http.NewRequest("POST", postUrl, bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error creating HTTP request: %v\n", chatId, err)
-		return "Unable to process your request. Please try again later."
+		return "", fmt.Errorf("unable to process your request. Please try again later")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Platform-Id", "telegram-bot")
@@ -281,7 +286,7 @@ func createLynkbinPost(chatId int64, email string, payload map[string]any) strin
 	resp, resErr := http.DefaultClient.Do(req)
 	if resErr != nil {
 		fmt.Printf("[ChatID: %d] Error posting to Lynkbin API: %v\n", chatId, resErr)
-		return "Unable to process your request. Please try again later."
+		return "", fmt.Errorf("unable to process your request. Please try again later")
 	}
 	defer resp.Body.Close()
 
@@ -295,24 +300,24 @@ func createLynkbinPost(chatId int64, email string, payload map[string]any) strin
 		} else {
 			fmt.Printf("[ChatID: %d] Response Body: %s\n", chatId, string(bodyBytes))
 		}
-		return "Unable to process your request. Please try again later."
+		return "", fmt.Errorf("unable to process your request. Please try again later")
 	}
 
 	var postResponse PostResponse
 	err = json.NewDecoder(resp.Body).Decode(&postResponse)
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error decoding response body: %v\n", chatId, err)
-		return "Unable to process your request. Please try again later."
+		return "", fmt.Errorf("unable to process your request. Please try again later")
 	}
 
 	if !postResponse.Success {
 		fmt.Printf("[ChatID: %d] Post creation failed. Server message: %s\n", chatId, postResponse.Message)
-		return "Unable to process your request. Please try again later."
+		return "", fmt.Errorf("unable to process your request. Please try again later")
 	}
 
 	postLink := postResponse.Data["post_link"].(string)
 	fmt.Printf("[ChatID: %d] Successfully created post: %s\n", chatId, postLink)
-	return fmt.Sprintf("Your link has been stored on Lynkbin: %s", postLink)
+	return postLink, nil
 }
 
 func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Client) string {
@@ -329,7 +334,7 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 
 	if email == "" || password == "" {
 		fmt.Printf("[ChatID: %d] Empty email or password provided\n", chatId)
-		return "Email and password cannot be empty. Please use: /login <email> <password>"
+		return "Email and password cannot be empty. Please use: /login &lt;email&gt; &lt;password&gt;"
 	}
 
 	fmt.Printf("[ChatID: %d] Attempting login for email: %s\n", chatId, email)
@@ -399,6 +404,7 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 func saveNoteKeyboardHandler(ctx context.Context, b *bot.Bot, mes models.MaybeInaccessibleMessage, data []byte) {
 	dataString := string(data)
 	msg := ""
+	baseMsg := getBaseMsg()
 	chatId := mes.Message.Chat.ID
 	redisClient, err := telegram_bot.NewRedisClient(os.Getenv("REDIS_URL"))
 	if err != nil {
@@ -410,13 +416,13 @@ func saveNoteKeyboardHandler(ctx context.Context, b *bot.Bot, mes models.MaybeIn
 	email := getLoginEmail(redisClient, chatId)
 	if email == "" {
 		fmt.Printf("[ChatID: %d] User not logged in, rejecting request\n", chatId)
-		baseMsg := getBaseMsg()
 		sendMessage(ctx, b, chatId, "You are not logged in. Please login first before posting to Lynkbin \n\n "+baseMsg)
 		return
 	}
 
 	userNoteKey := fmt.Sprintf("user_note:%d", chatId)
 
+	postLink := ""
 	if dataString == "YES" {
 		userNote, err := redisClient.Get(context.Background(), userNoteKey).Result()
 		if err == redis.Nil {
@@ -429,19 +435,25 @@ func saveNoteKeyboardHandler(ctx context.Context, b *bot.Bot, mes models.MaybeIn
 			payload := map[string]any{
 				"notes": userNote,
 			}
-			msg = createLynkbinPost(chatId, email, payload)
+			postLink, err = createLynkbinPost(chatId, email, payload)
+			if err != nil {
+				msg = err.Error()
+			} else {
+				msg = fmt.Sprintf("Note saved successfully: %s\n\n <b>Long-press link to open in default browser</b>\n\n %s", postLink, baseMsg)
+			}
 		}
 	} else {
 		redisClient.Del(context.Background(), userNoteKey)
-		msg = "no note saved"
+		msg = "No note saved"
 	}
 	sendMessage(ctx, b, chatId, msg)
 }
 
 func sendMessage(ctx context.Context, b *bot.Bot, chatId int64, text string) {
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatId,
-		Text:   text,
+		ChatID:    chatId,
+		Text:      text,
+		ParseMode: "HTML",
 	})
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error sending message to user: %v\n", chatId, err)

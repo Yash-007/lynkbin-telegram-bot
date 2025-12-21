@@ -23,7 +23,7 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-type LoginResponse struct {
+type GenericResponse struct {
 	Data    interface{} `json:"data"`
 	Success bool        `json:"success"`
 	Message string      `json:"message"`
@@ -33,6 +33,12 @@ type PostResponse struct {
 	Data    map[string]interface{} `json:"data"`
 	Success bool                   `json:"success"`
 	Message string                 `json:"message"`
+}
+
+type RecentPostsResponse struct {
+	Data    []map[string]interface{} `json:"data"`
+	Success bool                     `json:"success"`
+	Message string                   `json:"message"`
 }
 
 func createHTTPClientWithProxy(proxyURL string) *http.Client {
@@ -163,6 +169,63 @@ func main() {
 			return
 		}
 		sendMessage(ctx, b, update.Message.Chat.ID, getBaseMsg())
+	})
+
+	b.RegisterHandler(bot.HandlerTypeMessageText, "/recent", bot.MatchTypeExact, func(ctx context.Context, b *bot.Bot, update *models.Update) {
+		if update == nil || update.Message == nil {
+			fmt.Println("Error: Received nil update or message in /recent handler")
+			return
+		}
+		baseMsg := getBaseMsg()
+		chatId := update.Message.Chat.ID
+
+		redisUrl := os.Getenv("REDIS_URL")
+		if redisUrl == "" {
+			fmt.Printf("[ChatID: %d] Error: REDIS_URL environment variable is not set\n", chatId)
+			sendMessage(ctx, b, chatId, "Service configuration error.")
+			return
+		}
+		redisClient, err := telegram_bot.NewRedisClient(redisUrl)
+		if err != nil {
+			fmt.Printf("[ChatID: %d] Error creating Redis client: %v\n", chatId, err)
+			sendMessage(ctx, b, chatId, "Unable to process your request. Please try again later.")
+			return
+		}
+
+		email := getLoginEmail(redisClient, chatId)
+		isLogin := email != ""
+		fmt.Printf("[ChatID: %d] User login status: %v (email: %s)\n", chatId, isLogin, email)
+
+		if !isLogin {
+			fmt.Printf("[ChatID: %d] User not logged in, rejecting request\n", chatId)
+			sendMessage(ctx, b, update.Message.Chat.ID, "You are not logged in. Please login first before posting to Lynkbin \n\n "+baseMsg)
+			return
+		}
+
+		recentPostsResponse, err := getRecentPosts(update.Message.Chat.ID, email)
+		if err != nil {
+			sendMessage(ctx, b, update.Message.Chat.ID, "Unable to fetch recent posts.")
+			return
+		}
+
+		posts := recentPostsResponse.Data
+		if len(posts) == 0 {
+			sendMessage(ctx, b, update.Message.Chat.ID, "No recent posts found.")
+			return
+		}
+		var sb strings.Builder
+		for i, post := range posts {
+			content, ok := post["data"]
+			if !ok {
+				continue
+			}
+			sb.WriteString(fmt.Sprintf("<b>%d</b>. \n%s\n\n\n", i+1, content))
+		}
+		msg := sb.String()
+		if msg == "" {
+			msg = "No recent posts found."
+		}
+		sendMessage(ctx, b, update.Message.Chat.ID, msg)
 	})
 
 	// Start the bot
@@ -320,6 +383,60 @@ func createLynkbinPost(chatId int64, email string, payload map[string]any) (stri
 	return postLink, nil
 }
 
+func getRecentPosts(chatId int64, email string) (RecentPostsResponse, error) {
+	serverUrl := os.Getenv("LYNKBIN_SERVER_URL")
+	if serverUrl == "" {
+		fmt.Printf("[ChatID: %d] Error: LYNKBIN_SERVER_URL environment variable is not set\n", chatId)
+		return RecentPostsResponse{}, fmt.Errorf("service configuration error. Please contact support")
+	}
+
+	postUrl := serverUrl + "/posts/recent"
+	fmt.Printf("[ChatID: %d] Getting to Lynkbin API: %s\n", chatId, postUrl)
+	req, err := http.NewRequest("GET", postUrl, nil)
+	if err != nil {
+		fmt.Printf("[ChatID: %d] Error creating HTTP request: %v\n", chatId, err)
+		return RecentPostsResponse{}, fmt.Errorf("unable to process your request. Please try again later")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Platform-Id", "telegram-bot")
+	req.Header.Set("X-Email-Id", email)
+
+	resp, resErr := http.DefaultClient.Do(req)
+	if resErr != nil {
+		fmt.Printf("[ChatID: %d] Error getting to Lynkbin API: %v\n", chatId, resErr)
+		return RecentPostsResponse{}, fmt.Errorf("unable to process your request. Please try again later")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		bodyBytes, readErr := io.ReadAll(resp.Body)
+		fmt.Printf("[ChatID: %d] Error: Unexpected status code from Lynkbin API\n", chatId)
+		fmt.Printf("[ChatID: %d] Status Code: %d\n", chatId, resp.StatusCode)
+		fmt.Printf("[ChatID: %d] Status: %s\n", chatId, resp.Status)
+		if readErr != nil {
+			fmt.Printf("[ChatID: %d] Error reading response body: %v\n", chatId, readErr)
+		} else {
+			fmt.Printf("[ChatID: %d] Response Body: %s\n", chatId, string(bodyBytes))
+		}
+		return RecentPostsResponse{}, fmt.Errorf("unable to process your request. Please try again later")
+	}
+
+	var recentPostsResponse RecentPostsResponse
+	err = json.NewDecoder(resp.Body).Decode(&recentPostsResponse)
+	if err != nil {
+		fmt.Printf("[ChatID: %d] Error decoding response body: %v\n", chatId, err)
+		return RecentPostsResponse{}, fmt.Errorf("unable to process your request. Please try again later")
+	}
+
+	if !recentPostsResponse.Success {
+		fmt.Printf("[ChatID: %d] Getting recent posts failed. Server message: %s\n", chatId, recentPostsResponse.Message)
+		return RecentPostsResponse{}, fmt.Errorf("unable to process your request. Please try again later")
+	}
+
+	fmt.Printf("[ChatID: %d] Successfully got recent posts: %+v\n", chatId, recentPostsResponse)
+	return recentPostsResponse, nil
+}
+
 func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Client) string {
 	if isLogin {
 		fmt.Printf("[ChatID: %d] User already logged in\n", chatId)
@@ -375,7 +492,7 @@ func hanldeLogin(msg string, chatId int64, isLogin bool, redisClient redis.Clien
 
 	fmt.Printf("[ChatID: %d] Login response status: %d %s\n", chatId, resp.StatusCode, resp.Status)
 
-	var loginResponse LoginResponse
+	var loginResponse GenericResponse
 	err = json.NewDecoder(resp.Body).Decode(&loginResponse)
 	if err != nil {
 		fmt.Printf("[ChatID: %d] Error decoding login response body: %v\n", chatId, err)

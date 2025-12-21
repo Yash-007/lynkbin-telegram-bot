@@ -79,7 +79,7 @@ func createHTTPClientWithProxy(proxyURL string) *http.Client {
 }
 
 func getBaseMsg() string {
-	return "Welcome to Lynkbin!\n\n For commands: /start\n\n For register, visit: https://lynkbin.vercel.app/auth\n\n For login, use command:\n /login &lt;email&gt; &lt;password&gt; \n\n For storing your links or notes: just paste it here\n\n <b>Long-press links to open in default browser</b>"
+	return "Welcome to Lynkbin!\n\n<b>For commands</b>: /start\n\n<b>For register</b>, visit: https://lynkbin.vercel.app/auth\n\n<b>For login</b>, use command:\n/login &lt;email&gt; &lt;password&gt;\n\n<b>For storing</b> your links or notes: just paste it here\n\n<b>View recent posts</b>: /recent \n\n<b>Long-press links to open in default browser</b>"
 }
 
 func isValidURL(msg string) bool {
